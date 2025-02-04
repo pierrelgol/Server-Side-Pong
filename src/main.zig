@@ -70,7 +70,7 @@ pub fn main() !u8 {
     defer runtime.deinit();
 
     const server_options: httpz.Config = .{
-        .port = 8080,
+        .port = 8081,
         .address = "127.0.0.1",
     };
 
