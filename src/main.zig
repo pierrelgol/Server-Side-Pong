@@ -41,24 +41,30 @@ pub fn main() !u8 {
     };
     defer envp.deinit();
 
-    // const db_pool_options: pg.Pool.Opts = .{
-    //     .size = 2,
-    //     .auth = .{
-    //         .username = "postgress",
-    //         .password = "pass",
-    //         .database = "foo",
-    //     },
-    //     .connect = .{
-    //         .host = "xxx.xxx.xxx",
-    //         .port = 1234,
-    //     },
-    // };
+    const db_username = envp.get("POSTGRES_USER") orelse "admin";
+    const db_password = envp.get("POSTGRES_PASSWORD") orelse "admin_password";
+    const db_name = envp.get("POSTGRES_DB") orelse "transcendencedb";
+    const db_host = envp.get("DB_HOST") orelse "postgres";
+    const db_port = std.fmt.parseInt(u16, envp.get("DB_PORT") orelse "5432", 10) catch 5432;
 
-    // var db_pool = pg.Pool.init(allocator, db_pool_options) catch |err| {
-    //     log.err("fatal error {!}. shutting down.", .{err});
-    //     return FAILURE;
-    // };
-    // defer db_pool.deinit();
+    const db_pool_options: pg.Pool.Opts = .{
+        .size = 8,
+        .auth = .{
+            .username = db_username,
+            .password = db_password,
+            .database = db_name,
+        },
+        .connect = .{
+            .host = db_host,
+            .port = db_port,
+        },
+    };
+
+    var db_pool = pg.Pool.init(allocator, db_pool_options) catch |err| {
+        log.err("fatal error {!}. shutting down.", .{err});
+        return FAILURE;
+    };
+    defer db_pool.deinit();
 
     var game_pool = GamePool.init(allocator, null);
     defer game_pool.deinit();

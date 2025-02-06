@@ -27,8 +27,9 @@ pub fn build(b: *std.Build) void {
     const server = b.addExecutable(.{
         .name = "server",
         .root_module = server_module,
-        .linkage = .static,
+        .link_libc = true,
     });
+    server.linkLibC();
     b.installArtifact(server);
 
     const check_server = b.addExecutable(.{
