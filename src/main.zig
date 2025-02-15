@@ -5,126 +5,122 @@
 //                                                    +:+ +:+         +:+     //
 //   By: pollivie <pollivie.student.42.fr>          +#+  +:+       +#+        //
 //                                                +#+#+#+#+#+   +#+           //
-//   Created: 2025/01/30 10:09:28 by pollivie          #+#    #+#             //
-//   Updated: 2025/01/30 10:09:29 by pollivie         ###   ########.fr       //
+//   Created: 2025/02/08 13:42:16 by pollivie          #+#    #+#             //
+//   Updated: 2025/02/08 13:42:17 by pollivie         ###   ########.fr       //
 //                                                                            //
 // ************************************************************************** //
 
 const std = @import("std");
+const pg = @import("pg");
+const httpz = @import("httpz");
 const log = std.log;
+const mem = std.mem;
 const heap = std.heap;
 const process = std.process;
-const httpz = @import("httpz");
-const pg = @import("pg");
-const Client = @import("Client.zig");
-const Runtime = @import("Runtime.zig");
-const GamePool = @import("GamePool.zig");
+const Game = @import("Game.zig").Game;
+const GamePool = @import("GamePool.zig").GamePool;
+const Runtime = @import("Runtime.zig").Runtime;
+const Thread = std.Thread;
 
-const SUCCESS: u8 = 0;
-const FAILURE: u8 = 1;
+const SUCCESS = 0;
+const FAILURE = 1;
+
+pub const std_options = std.Options{
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .websocket, .level = .err },
+    },
+    .http_enable_ssl_key_log_file = true,
+};
+
+const gpa_config: heap.GeneralPurposeAllocatorConfig = .{
+    .safety = true,
+    .thread_safe = true,
+    .retain_metadata = true,
+};
 
 pub fn main() !u8 {
-    const gpa_options: heap.GeneralPurposeAllocatorConfig = .{
-        .safety = true,
-        .thread_safe = true,
-        .never_unmap = true,
-        .retain_metadata = true,
-    };
-
-    var gpa: heap.GeneralPurposeAllocator(gpa_options) = .init;
+    var gpa: heap.GeneralPurposeAllocator(gpa_config) = .init;
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    std.log.info("initializing memory allocator.", .{});
+    log.debug("General Purpose Allocator initialized.", .{});
 
-    var envp = process.getEnvMap(allocator) catch |err| {
-        log.err("fatal error {!}. shutting down.", .{err});
+    var envp = process.getEnvMap(gpa.allocator()) catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
         return FAILURE;
     };
+    log.debug("Environment variables loaded.", .{});
     defer envp.deinit();
 
-    const db_username = envp.get("POSTGRES_USER") orelse "admin";
-    const db_password = envp.get("POSTGRES_PASSWORD") orelse "admin_password";
-    const db_name = envp.get("POSTGRES_DB") orelse "transcendencedb";
-    const db_host = envp.get("DB_HOST") orelse "postgres";
-    const db_port = std.fmt.parseInt(u16, envp.get("DB_PORT") orelse "5432", 10) catch 5432;
-
-    const db_pool_options: pg.Pool.Opts = .{
-        .size = 8,
-        .auth = .{
-            .username = db_username,
-            .password = db_password,
-            .database = db_name,
-        },
-        .connect = .{
-            .host = db_host,
-            .port = db_port,
-        },
-    };
-
-    var db_pool = pg.Pool.init(allocator, db_pool_options) catch |err| {
-        log.err("fatal error {!}. shutting down.", .{err});
+    const db_url = envp.get("DATABASE_URL") orelse {
+        log.err("Encountered Fatal Error missing 'DATABASE_URL'", .{});
         return FAILURE;
     };
+    log.debug("DATABASE_URL found: {s}", .{db_url});
+
+    const db_uri = std.Uri.parse(db_url) catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
+        return FAILURE;
+    };
+    log.debug("DATABASE_URL parsed into URI successfully.", .{});
+
+    var db_pool = pg.Pool.initUri(gpa.allocator(), db_uri, 2, 10_000) catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
+        return FAILURE;
+    };
+    log.debug("Database pool initialized.", .{});
     defer db_pool.deinit();
 
-    var game_pool = GamePool.init(allocator, null);
-    defer game_pool.deinit();
+    var gm_pool = GamePool.init(gpa.allocator());
+    log.debug("GamePool initialized.", .{});
+    defer gm_pool.deinit();
 
-    var runtime = Runtime.init(allocator, null, &game_pool) catch |err| {
-        log.err("fatal error {!}. shutting down.", .{err});
+    var runtime = Runtime.init(gpa.allocator(), db_pool, &gm_pool) catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
         return FAILURE;
     };
-    defer runtime.deinit();
+    log.debug("Runtime initialized.", .{});
 
-    const server_options: httpz.Config = .{
+    const server_opts: httpz.Config = .{
         .port = 8081,
-        .address = "127.0.0.1",
+        .address = "0.0.0.0",
+        .thread_pool = .{
+            .count = 2,
+            .backlog = 500,
+        },
+        .workers = .{
+            .count = 2,
+        },
     };
 
-    var server = httpz.Server(*Runtime).init(allocator, server_options, &runtime) catch |err| {
-        log.err("fatal error {!}. shutting down.", .{err});
+    var server = httpz.Server(*Runtime).init(gpa.allocator(), server_opts, &runtime) catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
         return FAILURE;
     };
-    defer {
-        server.stop();
-        server.deinit();
-    }
-
-    std.debug.print("listening", .{});
-    server.listen() catch |err| {
-        log.err("fatal error {!}. shutting down.", .{err});
-        return FAILURE;
-    };
+    log.debug("Server instance created.", .{});
+    defer server.stop();
+    defer server.deinit();
 
     var router = server.router(.{});
-    router.get("/play/:game_id", Runtime.handleWebSocketUpgrade, .{ .handler = &runtime });
+    log.debug("Router configured.", .{});
+
+    router.tryGet("/game/:game_id", Runtime.handleWebsocketUpgrade, .{ .handler = &runtime }) catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
+        return FAILURE;
+    };
+    log.debug("Route '/game/:game_id' for websocket upgrade configured.", .{});
+
+    server.listen() catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
+        return FAILURE;
+    };
+    log.debug("Server is now listening for connections.", .{});
+    const thread = server.listenInNewThread() catch |err| {
+        log.err("Encountered Fatal Error : {!}", .{err});
+        return FAILURE;
+    };
+    log.debug("Server is now listening for connections.", .{});
+
+    thread.join();
 
     return SUCCESS;
-}
-
-test "request" {
-    const allocator = std.heap.page_allocator;
-
-    // Initialize runtime (handler)
-    var game_pool = GamePool.init(allocator, null);
-    defer game_pool.deinit();
-
-    var runtime = Runtime.init(allocator, null, &game_pool) catch |err| {
-        std.debug.print("Fatal error {!}. Shutting down.\n", .{err});
-        return;
-    };
-    defer runtime.deinit();
-
-    var web_test = httpz.testing.init(.{});
-    defer web_test.deinit();
-
-    // Simulate request to /play/game123
-    web_test.param("game_id", "game123");
-    web_test.query("player_id", "p1");
-
-    // Call handler
-    try Runtime.handleWebSocketUpgrade(&runtime, web_test.req, web_test.res);
-
-    // Print response
-    std.debug.print("Response status: {}\n", .{web_test.res.status});
-    std.debug.print("Response body: {s}\n", .{web_test.res.body});
 }

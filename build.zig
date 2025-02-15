@@ -1,7 +1,13 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{ .default_target = .{
+        .cpu_arch = .x86_64,
+        .cpu_model = .baseline,
+        .os_tag = .linux,
+        .abi = .musl,
+    } });
+    // const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const httpz_dep = b.dependency("httpz", .{
@@ -35,6 +41,7 @@ pub fn build(b: *std.Build) void {
     const check_server = b.addExecutable(.{
         .name = "server",
         .root_module = server_module,
+        .link_libc = true,
     });
 
     const check_step = b.step("check", "run compilation without emitting binaries");
